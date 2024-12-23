@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  parameter-service:
+    build: ./services/parameter-service
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/rf_platform
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+
+  simulation-service:
+    build: ./services/simulation-service
+    environment:
+      - PARAMETER_SERVICE_URL=http://parameter-service:8000
+    depends_on:
+      - parameter-service
+
+  external-data-service:
+    build: ./services/external-data-service
+    environment:
+      - CORE_SERVICE_URL=http://core-service:8000
+    depends_on:
+      - core-service
+
+  core-service:
+    build: ./services/core-service
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:13
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:6
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data: 
