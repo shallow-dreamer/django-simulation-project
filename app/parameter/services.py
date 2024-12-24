@@ -1,6 +1,17 @@
-from app.core.services import ProcessingService
-from .models import SParameter, SParameterHistory
 from django.core.cache import cache
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from django.utils import timezone
+from django.conf import settings
+import json
+import tempfile
+from pathlib import Path
+import zipfile
+from datetime import datetime, timedelta
+from tempfile import TemporaryDirectory, NamedTemporaryFile
+
+from app.core.services import ProcessingService
+from .models import SParameter, SParameterHistory, Simulation
 
 class SParameterProcessor(ProcessingService):
     """S参数处理服务"""
@@ -120,3 +131,135 @@ class SParameterDataService:
                     data['insertion_loss'][key] = self._calculate_insertion_loss(
                         data, port1, port2
                     )
+
+class SParameterAnalyzer:
+    def __init__(self, data_points):
+        self.data_points = data_points
+
+    def get_return_loss(self, port):
+        # 实现返回损耗分析
+        pass
+
+    def get_insertion_loss(self, port1, port2):
+        # 实现插入损耗分析
+        pass
+
+    def get_vswr(self, port):
+        # 实现驻波比分析
+        pass
+
+class RetryManager:
+    def __init__(self, max_retries=3, delay=5):
+        self.max_retries = max_retries
+        self.delay = delay
+
+    def should_retry(self, simulation):
+        """判断是否应该重试"""
+        return (simulation.status == 'failed' and 
+                simulation.retry_count < self.max_retries)
+
+    def handle_retry(self, simulation):
+        """处理重试逻辑"""
+        if self.should_retry(simulation):
+            simulation.retry_count += 1
+            simulation.status = 'pending'
+            simulation.save()
+            # 延迟重试
+            run_simulation.apply_async(
+                args=[simulation.id, simulation.parameters],
+                countdown=self.delay * simulation.retry_count
+            )
+            return True
+        return False
+
+class SimulationService:
+    def __init__(self, simulation_id):
+        self.simulation_id = simulation_id
+        self._temp_dir = None
+        self.files_to_pack = []
+        self.retry_manager = RetryManager()
+
+    def __enter__(self):
+        """使用 TemporaryDirectory 上下文管理器"""
+        self._temp_dir = TemporaryDirectory()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """自动清理临时目录"""
+        if self._temp_dir:
+            self._temp_dir.cleanup()
+
+    def save_plot(self, name: str, figure=None):
+        """保存图表到临时文件"""
+        if figure is None:
+            figure = plt.gcf()
+        
+        file_path = Path(self._temp_dir.name) / f"{name}.png"
+        figure.savefig(file_path)
+        plt.close(figure)
+        
+        self.files_to_pack.append(('plots', file_path))
+        return file_path
+
+    def save_text(self, name: str, content: str):
+        """保存文本到临时文件"""
+        file_path = Path(self._temp_dir.name) / f"{name}.txt"
+        file_path.write_text(content, encoding='utf-8')
+        
+        self.files_to_pack.append(('texts', file_path))
+        return file_path
+
+    def save_data(self, name: str, data: dict):
+        """保存数据到临时JSON文件"""
+        file_path = Path(self._temp_dir.name) / f"{name}.json"
+        file_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        
+        self.files_to_pack.append(('data', file_path))
+        return file_path
+
+    def create_result_package(self) -> str:
+        """创建结果压缩包"""
+        # 使用 NamedTemporaryFile 创建临时 ZIP 文件
+        with NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
+            with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # 添加文件到 ZIP
+                for category, file_path in self.files_to_pack:
+                    archive_path = f"{category}/{file_path.name}"
+                    zip_file.write(file_path, archive_path)
+                
+                # 添加元数据
+                metadata = {
+                    'simulation_id': self.simulation_id,
+                    'file_count': len(self.files_to_pack),
+                    'categories': list(set(cat for cat, _ in self.files_to_pack)),
+                    'files': [
+                        {
+                            'category': cat,
+                            'name': path.name,
+                            'size': path.stat().st_size
+                        }
+                        for cat, path in self.files_to_pack
+                    ]
+                }
+                zip_file.writestr('metadata.json', json.dumps(metadata, indent=2))
+
+        try:
+            # 读取临时 ZIP 文件并保存到存储
+            zip_path = f"simulations/simulation_{self.simulation_id}_results.zip"
+            with open(temp_zip.name, 'rb') as f:
+                default_storage.save(zip_path, ContentFile(f.read()))
+            
+            return zip_path
+        finally:
+            # 清理临时 ZIP 文件
+            Path(temp_zip.name).unlink(missing_ok=True)
+
+    def handle_error(self, error_message):
+        """处理错误"""
+        simulation = Simulation.objects.get(id=self.simulation_id)
+        simulation.status = 'failed'
+        simulation.error_message = error_message
+        simulation.save()
+        
+        # 尝试重试
+        self.retry_manager.handle_retry(simulation)

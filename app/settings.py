@@ -150,19 +150,46 @@ STATICFILES_DIRS = [
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Storage Configuration
+# 文件存储配置
+DEFAULT_FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
+# 如果使用 S3，可以配置为：
+# DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+
+# 存储相关配置
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
         "OPTIONS": {
-            "location": os.path.join(BASE_DIR, 'media'),
-            "base_url": '/media/',
+            "location": BASE_DIR / "media",
+            "base_url": "/media/",
         },
     },
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
+
+# 如果使用 S3，配置示例：
+# STORAGES = {
+#     "default": {
+#         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+#         "OPTIONS": {
+#             "access_key": "your-access-key",
+#             "secret_key": "your-secret-key",
+#             "bucket_name": "your-bucket",
+#             "region_name": "your-region",
+#             "custom_domain": "cdn.yourdomain.com",  # 可选，用于自定义域名
+#             "querystring_auth": False,  # 是否在URL中添加认证信息
+#             "default_acl": "public-read",  # 文件访问权限
+#         },
+#     },
+# }
+
+# 如果使用 S3，添加以下配置
+# AWS_ACCESS_KEY_ID = 'your-access-key'
+# AWS_SECRET_ACCESS_KEY = 'your-secret-key'
+# AWS_STORAGE_BUCKET_NAME = 'your-bucket-name'
+# AWS_S3_REGION_NAME = 'your-region'
 
 # Celery Configuration
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
@@ -255,6 +282,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'app.external_data.tasks.cleanup_old_records',
         'schedule': crontab(hour=2, minute=0),  # 每天凌晨2点执行
     },
+    'cleanup-simulation-results': {
+        'task': 'app.parameter.tasks.cleanup_old_results',
+        'schedule': crontab(hour=2, minute=0),  # 每天凌晨2点执行
+    }
 }
 
 # 缓存配置
@@ -296,3 +327,12 @@ CACHE_TIMEOUTS = {
     'external_data': 1800,        # 30分钟
     'analysis_result': 7200,      # 2小时
 }
+
+# URL配置
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# 仿真结果配置
+SIMULATION_RESULTS_EXPIRY_DAYS = 30  # 结果保留天数
+SIMULATION_MAX_RETRIES = 3           # 最大重试次数
+SIMULATION_RETRY_DELAY = 300         # 重试延迟（秒）
