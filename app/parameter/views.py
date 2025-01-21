@@ -473,10 +473,17 @@ class SParameterViewSet(viewsets.ModelViewSet):
         return Response(result)
 
     @action(detail=False, methods=['post'])
-    @file_based_cache(file_params='file_path')
-    def process_single_file(self, file_path):
-        pass
-    
+    @file_based_cache(
+        file_params='file_path',
+        backend='file',
+        timeout=3600,
+        sub_dirs=['user_data', 'parameters']
+    )
+    def process_file(self, request):
+        file_path = request.data.get('file_path')
+        result = self.process_single_file(file_path)
+        return Response(result)
+
     @action(detail=False, methods=['post'])
     @file_based_cache(file_params=0)  # 第一个参数是文件路径
     def process_file_by_position(self, file_path, other_param):
@@ -553,77 +560,45 @@ class SParameterViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def process_multiple_files(self, request):
         """处理多个文件并单独缓存结果"""
-        file_list = request.data.get('files', [])  # 假设传入文件路径列表
-        cache_manager = CacheManager(backend='default', timeout=3600)
+        file_list = request.data.get('files', [])
+        
+        # 使用支持子目录的文件缓存
+        cache_manager = CacheManager(
+            backend='file',  # 使用扩展的文件缓存后端
+            timeout=3600,
+            sub_dirs=[f'user_{request.user.id}', 'parameter_data']
+        )
         
         results = {}
-        missing_files = []
-        cached_count = 0
-        processed_count = 0
-        
         for file_info in file_list:
-            # 支持不同的文件路径格式
-            if isinstance(file_info, dict):
-                # 复杂路径格式
-                file_path = os.path.join(
-                    file_info.get('base_dir', ''),
-                    file_info.get('sub_dir', ''),
-                    file_info.get('filename', '')
-                )
-            else:
-                # 简单路径格式
-                file_path = str(file_info)
-            
-            # 检查文件是否存在
-            if not os.path.exists(file_path):
-                missing_files.append(file_path)
-                continue
-            
-            # 生成缓存键
+            file_path = str(file_info)
             file_hash = cache_manager.get_file_hash(file_path)
             if not file_hash:
                 continue
             
             cache_key = f"file_result_{file_hash}"
-            
-            # 尝试获取缓存
             cached_result = cache_manager.get(cache_key)
+            
             if cached_result is not None:
-                results[file_path] = {
-                    'data': cached_result,
-                    'source': 'cache'
-                }
-                cached_count += 1
+                results[file_path] = cached_result
                 continue
             
-            try:
-                # 处理文件并缓存结果
-                result = self.process_single_file(file_path)
-                cache_manager.set(cache_key, result)
-                
-                results[file_path] = {
-                    'data': result,
-                    'source': 'processed'
-                }
-                processed_count += 1
-                
-            except Exception as e:
-                results[file_path] = {
-                    'error': str(e),
-                    'source': 'error'
-                }
+            result = self.process_single_file(file_path)
+            cache_manager.set(cache_key, result)
+            results[file_path] = result
         
-        # 返回处理结果
-        return Response({
-            'results': results,
-            'summary': {
-                'total_files': len(file_list),
-                'cached_results': cached_count,
-                'processed_files': processed_count,
-                'failed_files': len(results) - cached_count - processed_count,
-                'missing_files': missing_files
-            }
-        })
+        return Response(results)
+
+    @action(detail=False, methods=['post'])
+    def clear_user_cache(self, request):
+        """清理用户的缓存数据"""
+        sub_dirs = [f'user_{request.user.id}']
+        cache_manager = CacheManager(
+            backend='file',
+            sub_dirs=sub_dirs
+        )
+        cache_manager.clear_sub_dir()
+        return Response({'status': 'cleared'})
 
     def process_single_file(self, file_path: str) -> dict:
         """处理单个文件的具体逻辑"""

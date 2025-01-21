@@ -9,14 +9,17 @@ from pathlib import Path
 from django.core.cache.backends.redis import RedisCache
 from django.core.cache.backends.filebased import FileBasedCache
 from django.core.cache.backends.locmem import LocMemCache
+from django.core.cache.backends import CustomFileCache
+from app.core.cache.mixins import SubDirCacheMixin
 
 class CacheManager:
     """缓存管理器"""
     
-    def __init__(self, backend='default', timeout=None, key_prefix=None):
+    def __init__(self, backend='default', timeout=None, key_prefix=None, sub_dirs=None):
         self.backend = backend
         self.timeout = timeout or getattr(settings, 'CACHE_TIMEOUT', 300)
         self.key_prefix = key_prefix or getattr(settings, 'CACHE_KEY_PREFIX', '')
+        self.sub_dirs = sub_dirs
         self._cache = caches[backend]
 
     def get_file_hash(self, file_path: Union[str, Path]) -> str:
@@ -53,20 +56,30 @@ class CacheManager:
 
     def get(self, key, default=None):
         """获取缓存"""
+        if isinstance(self._cache, SubDirCacheMixin) and self.sub_dirs:
+            return self._cache.get_with_sub_dirs(key, self.sub_dirs, default)
         return self._cache.get(key, default)
 
     def set(self, key, value, timeout=None):
         """设置缓存"""
-        timeout = timeout or self.timeout
-        self._cache.set(key, value, timeout)
+        if isinstance(self._cache, SubDirCacheMixin) and self.sub_dirs:
+            return self._cache.set_with_sub_dirs(key, value, self.sub_dirs, timeout or self.timeout)
+        return self._cache.set(key, value, timeout or self.timeout)
 
     def delete(self, key):
         """删除缓存"""
-        self._cache.delete(key)
+        if isinstance(self._cache, SubDirCacheMixin) and self.sub_dirs:
+            return self._cache.delete_with_sub_dirs(key, self.sub_dirs)
+        return self._cache.delete(key)
 
     def clear(self):
         """清除所有缓存"""
         self._cache.clear()
+
+    def clear_sub_dir(self):
+        """清除子目录缓存"""
+        if isinstance(self._cache, SubDirCacheMixin) and self.sub_dirs:
+            return self._cache.clear_sub_dir(self.sub_dirs)
 
     def cached(self, timeout=None, key_prefix=None, key_generator=None):
         """

@@ -141,6 +141,7 @@ def file_based_cache(
     file_params: Union[str, int, List[Union[str, int]], Dict[str, str]], 
     backend='default', 
     timeout=None,
+    sub_dirs: List[str] = None,
     path_join_func: Callable = None
 ):
     """
@@ -152,9 +153,14 @@ def file_based_cache(
         - Dict[str, str]: 键为参数名，值为参数类型('path'/'name')
     :param backend: 缓存后端
     :param timeout: 超时时间
+    :param sub_dirs: 子目录列表
     :param path_join_func: 自定义路径拼接函数
     """
-    cache_manager = CacheManager(backend=backend, timeout=timeout)
+    cache_manager = CacheManager(
+        backend=backend,
+        timeout=timeout,
+        sub_dirs=sub_dirs
+    )
     
     def get_file_paths(args, kwargs) -> List[str]:
         """获取所有文件路径"""

@@ -14,6 +14,10 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from celery.schedules import crontab
+from django.core.cache.backends.filebased import FileBasedCache
+from django.core.cache.backends.redis import RedisCache
+from django.core.cache.backends.locmem import LocMemCache
+from app.core.cache.mixins import SubDirCacheMixin
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -288,20 +292,29 @@ CELERY_BEAT_SCHEDULE = {
     }
 }
 
+# 动态创建支持子目录的缓存类
+class SubDirFileBasedCache(SubDirCacheMixin, FileBasedCache):
+    pass
+
+class SubDirRedisCache(SubDirCacheMixin, RedisCache):
+    pass
+
+class SubDirLocMemCache(SubDirCacheMixin, LocMemCache):
+    pass
+
 # 缓存配置
 CACHES = {
-    'default': {
-        'BACKEND': 'app.core.cache.backends.CustomRedisCache',  # 自定义Redis后端
-        'LOCATION': 'redis://127.0.0.1:6379/1',
+    # 方案一：使用自定义缓存后端
+    'custom_file': {
+        'BACKEND': 'app.core.cache.backends.CustomFileCache',
+        'LOCATION': '/var/tmp/django_cache/custom',
     },
+    
+    # 方案二：使用混入类扩展的缓存后端
     'file': {
-        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',  # 原生文件缓存
-        'LOCATION': '/var/tmp/django_cache',
+        'BACKEND': 'app.core.cache.backends.SubDirFileBasedCache',
+        'LOCATION': '/var/tmp/django_cache/mixin',
     },
-    'session': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',  # 原生Redis
-        'LOCATION': 'redis://127.0.0.1:6379/2',
-    }
 }
 
 # 缓存超时设置
