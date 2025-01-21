@@ -12,6 +12,8 @@ from rest_framework.parsers import MultiPartParser
 import hashlib
 import tempfile
 from pathlib import Path
+import os
+from django.utils import timezone
 
 from .models import SParameter, Simulation
 from .serializers import SParameterSerializer, SimulationSerializer
@@ -22,8 +24,9 @@ from .services import (
     RetryManager
 )
 from .validators import SParameterValidator
-from app.core.decorators import cache_view_result
+from app.core.decorators import cache_view_result, cache_result, cache_method_result, file_based_cache
 from .tasks import generate_parameter_export, run_simulation
+from app.core.cache import CacheManager
 
 class SParameterViewSet(viewsets.ModelViewSet):
     queryset = SParameter.objects.all()
@@ -449,6 +452,191 @@ class SParameterViewSet(viewsets.ModelViewSet):
             'created_at': simulation.created_at,
             'updated_at': simulation.updated_at
         })
+
+    @action(detail=True, methods=['get'])
+    @cache_result(backend='redis', timeout=3600)
+    def get_analysis(self, request, pk=None):
+        """获取分析结果（使用装饰器缓存）"""
+        instance = self.get_object()
+        result = self.analyze_data(instance)
+        return Response(result)
+
+    @action(detail=True, methods=['get'])
+    @cache_result(
+        backend='redis',
+        timeout=3600,
+        key_generator=lambda *args, **kwargs: f"custom_key_{kwargs.get('pk')}"
+    )
+    def get_custom_cache(self, request, pk=None):
+        instance = self.get_object()
+        result = self.process_data(instance)
+        return Response(result)
+
+    @action(detail=False, methods=['post'])
+    @file_based_cache(file_params='file_path')
+    def process_single_file(self, file_path):
+        pass
+    
+    @action(detail=False, methods=['post'])
+    @file_based_cache(file_params=0)  # 第一个参数是文件路径
+    def process_file_by_position(self, file_path, other_param):
+        pass
+    
+    @action(detail=False, methods=['post'])
+    @file_based_cache(file_params=['base_path', 'filename'])
+    def process_file_with_parts(self, base_path, filename):
+        pass
+    
+    @action(detail=False, methods=['post'])
+    @file_based_cache(
+        file_params={
+            'base_dir': 'path',
+            'sub_dir': 'path',
+            'filename': 'name'
+        }
+    )
+    def process_complex_path(self, base_dir, sub_dir, filename):
+        pass
+    
+    @action(detail=False, methods=['post'])
+    @file_based_cache(
+        file_params=['path', 'name'],
+        path_join_func=lambda path, name: f"{path}/{name}.txt"
+    )
+    def process_custom_path(self, path, name):
+        pass
+    
+    @action(detail=False, methods=['post'])
+    @file_based_cache(
+        file_params={
+            'base_path': 'path',
+            'year': 'path',
+            'month': 'path',
+            'filename': 'name'
+        },
+        backend='file',
+        timeout=3600
+    )
+    def process_dated_file(self, request):
+        base_path = request.data.get('base_path')
+        year = request.data.get('year')
+        month = request.data.get('month')
+        filename = request.data.get('filename')
+        
+        # 处理文件
+        result = self.process_file_content(
+            os.path.join(base_path, year, month, filename)
+        )
+        return Response(result)
+
+    @action(detail=False, methods=['post'])
+    def clear_cache(self, request):
+        """清理指定模式的缓存"""
+        pattern = request.data.get('pattern', '')
+        cache_manager = CacheManager(backend='default')
+        deleted_count = cache_manager.delete_pattern(pattern)
+        return Response({
+            'deleted_count': deleted_count
+        })
+
+    @action(detail=True, methods=['post'])
+    def extend_cache(self, request, pk=None):
+        """延长缓存时间"""
+        instance = self.get_object()
+        cache_manager = CacheManager(backend='file')
+        cache_key = f"parameter_data_{instance.id}"
+        
+        if cache_manager.touch(cache_key, timeout=7200):
+            return Response({'status': 'extended'})
+        return Response({'status': 'not_found'}, status=404)
+
+    @action(detail=False, methods=['post'])
+    def process_multiple_files(self, request):
+        """处理多个文件并单独缓存结果"""
+        file_list = request.data.get('files', [])  # 假设传入文件路径列表
+        cache_manager = CacheManager(backend='default', timeout=3600)
+        
+        results = {}
+        missing_files = []
+        cached_count = 0
+        processed_count = 0
+        
+        for file_info in file_list:
+            # 支持不同的文件路径格式
+            if isinstance(file_info, dict):
+                # 复杂路径格式
+                file_path = os.path.join(
+                    file_info.get('base_dir', ''),
+                    file_info.get('sub_dir', ''),
+                    file_info.get('filename', '')
+                )
+            else:
+                # 简单路径格式
+                file_path = str(file_info)
+            
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                missing_files.append(file_path)
+                continue
+            
+            # 生成缓存键
+            file_hash = cache_manager.get_file_hash(file_path)
+            if not file_hash:
+                continue
+            
+            cache_key = f"file_result_{file_hash}"
+            
+            # 尝试获取缓存
+            cached_result = cache_manager.get(cache_key)
+            if cached_result is not None:
+                results[file_path] = {
+                    'data': cached_result,
+                    'source': 'cache'
+                }
+                cached_count += 1
+                continue
+            
+            try:
+                # 处理文件并缓存结果
+                result = self.process_single_file(file_path)
+                cache_manager.set(cache_key, result)
+                
+                results[file_path] = {
+                    'data': result,
+                    'source': 'processed'
+                }
+                processed_count += 1
+                
+            except Exception as e:
+                results[file_path] = {
+                    'error': str(e),
+                    'source': 'error'
+                }
+        
+        # 返回处理结果
+        return Response({
+            'results': results,
+            'summary': {
+                'total_files': len(file_list),
+                'cached_results': cached_count,
+                'processed_files': processed_count,
+                'failed_files': len(results) - cached_count - processed_count,
+                'missing_files': missing_files
+            }
+        })
+
+    def process_single_file(self, file_path: str) -> dict:
+        """处理单个文件的具体逻辑"""
+        # 这里是实际的文件处理逻辑
+        with open(file_path, 'r') as f:
+            content = f.read()
+            # 进行处理...
+            result = {
+                'file_size': os.path.getsize(file_path),
+                'processed_data': content[:100],  # 示例处理
+                'timestamp': timezone.now().isoformat()
+            }
+        return result
 
 @shared_task
 def run_simulation(simulation_id: int, parameters: dict):

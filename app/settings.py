@@ -291,42 +291,28 @@ CELERY_BEAT_SCHEDULE = {
 # 缓存配置
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'BACKEND': 'app.core.cache.backends.CustomRedisCache',  # 自定义Redis后端
         'LOCATION': 'redis://127.0.0.1:6379/1',
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'PARSER_CLASS': 'redis.connection.HiredisParser',
-            'CONNECTION_POOL_CLASS': 'redis.connection.BlockingConnectionPool',
-            'CONNECTION_POOL_CLASS_KWARGS': {
-                'max_connections': 50,
-                'timeout': 20,
-            },
-            'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
-            'SERIALIZER': 'django_redis.serializers.json.JSONSerializer',
-        }
     },
-    'simulation': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+    'file': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',  # 原生文件缓存
+        'LOCATION': '/var/tmp/django_cache',
+    },
+    'session': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',  # 原生Redis
         'LOCATION': 'redis://127.0.0.1:6379/2',
-        'TIMEOUT': 3600,  # 1小时
-    },
-    'parameters': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': 'redis://127.0.0.1:6379/3',
-        'TIMEOUT': 86400,  # 24小时
     }
+}
+
+# 缓存超时设置
+CACHE_TIMEOUTS = {
+    'short': 300,      # 5分钟
+    'medium': 3600,    # 1小时
+    'long': 86400,     # 24小时
 }
 
 # 缓存键前缀
 CACHE_KEY_PREFIX = 'rf_'
-
-# 缓存超时设置
-CACHE_TIMEOUTS = {
-    'simulation_result': 3600,    # 1小时
-    'parameter_data': 86400,      # 24小时
-    'external_data': 1800,        # 30分钟
-    'analysis_result': 7200,      # 2小时
-}
 
 # URL配置
 MEDIA_URL = '/media/'
