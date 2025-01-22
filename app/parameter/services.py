@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory, NamedTemporaryFile
 
 from app.core.services import ProcessingService
 from .models import SParameter, SParameterHistory, Simulation
+from app.core.cache.manager import FileCacheManager, CacheManager
 
 class SParameterProcessor(ProcessingService):
     """S参数处理服务"""
@@ -263,3 +264,49 @@ class SimulationService:
         
         # 尝试重试
         self.retry_manager.handle_retry(simulation)
+
+class DataProcessingService:
+    def __init__(self):
+        self.cache_manager = CacheManager(backend='redis')
+        self.file_cache_manager = FileCacheManager(
+            backend='file',
+            sub_dirs=['processing', 'temp']
+        )
+    
+    def process_data(self, data_id: int) -> dict:
+        """处理普通数据"""
+        cache_key = f"processed_data_{data_id}"
+        
+        return self.cache_manager.get_or_set(
+            cache_key,
+            lambda: self._perform_processing(data_id)
+        )
+    
+    def process_file_data(self, file_path: str) -> dict:
+        """处理文件数据"""
+        return self.file_cache_manager.cache_with_files(
+            file_paths=file_path,
+            func=self._process_file_content,
+            args=(file_path,)
+        )
+    
+    def process_multiple_files(self, base_dir: str, file_pattern: str) -> dict:
+        """处理多个文件"""
+        # 使用文件路径处理器获取路径
+        paths = self.file_cache_manager.get_file_paths(
+            file_params={
+                'base_dir': 'path',
+                'pattern': 'name'
+            },
+            kwargs={
+                'base_dir': base_dir,
+                'pattern': file_pattern
+            }
+        )
+        
+        # 批量处理文件
+        return self.file_cache_manager.cache_with_files(
+            file_paths=paths,
+            func=self._batch_process_files,
+            args=(paths,)
+        )

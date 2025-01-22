@@ -22,6 +22,7 @@ from .services import SimulationService
 # 添加缺失的导入
 import numpy as np
 import matplotlib.pyplot as plt
+from app.core.cache.manager import FileCacheManager
 
 @shared_task
 def generate_parameter_export(ids: list, user_id: int) -> str:
@@ -152,4 +153,25 @@ def cleanup_old_results():
         simulation.result_file = None
         simulation.save()
 
-    return f"Cleaned up {expired_simulations.count()} simulation results" 
+    return f"Cleaned up {expired_simulations.count()} simulation results"
+
+@shared_task
+def process_large_file(file_path: str):
+    cache_manager = FileCacheManager(
+        backend='file',
+        timeout=86400,  # 24小时
+        sub_dirs=['tasks', 'large_files']
+    )
+    
+    def process_chunks(path):
+        results = []
+        with open(path, 'rb') as f:
+            while chunk := f.read(8192):
+                results.append(process_chunk(chunk))
+        return results
+    
+    return cache_manager.cache_with_files(
+        file_paths=file_path,
+        func=process_chunks,
+        args=(file_path,)
+    ) 

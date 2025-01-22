@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 import os
 from django.utils import timezone
+from datetime import datetime
 
 from .models import SParameter, Simulation
 from .serializers import SParameterSerializer, SimulationSerializer
@@ -27,6 +28,7 @@ from .validators import SParameterValidator
 from app.core.decorators import cache_view_result, cache_result, cache_method_result, file_based_cache
 from .tasks import generate_parameter_export, run_simulation
 from app.core.cache import CacheManager
+from app.core.cache.manager import FileCacheManager
 
 class SParameterViewSet(viewsets.ModelViewSet):
     queryset = SParameter.objects.all()
@@ -462,15 +464,21 @@ class SParameterViewSet(viewsets.ModelViewSet):
         return Response(result)
 
     @action(detail=True, methods=['get'])
-    @cache_result(
-        backend='redis',
-        timeout=3600,
-        key_generator=lambda *args, **kwargs: f"custom_key_{kwargs.get('pk')}"
-    )
-    def get_custom_cache(self, request, pk=None):
-        instance = self.get_object()
-        result = self.process_data(instance)
-        return Response(result)
+    def get_cached_data(self, request, pk=None):
+        cache_manager = CacheManager(
+            backend='redis',
+            timeout=3600,
+            key_prefix='parameter_data'
+        )
+        
+        cache_key = f"data_{pk}"
+        cached_data = cache_manager.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+            
+        data = self.process_data(self.get_object())
+        cache_manager.set(cache_key, data)
+        return Response(data)
 
     @action(detail=False, methods=['post'])
     @file_based_cache(
@@ -502,8 +510,32 @@ class SParameterViewSet(viewsets.ModelViewSet):
             'filename': 'name'
         }
     )
-    def process_complex_path(self, base_dir, sub_dir, filename):
-        pass
+    def process_complex_path(self, request, pk=None):
+        """处理复杂路径的文件"""
+        # 创建缓存管理器
+        cache_manager = CacheManager(backend='file')
+        
+        # 获取文件路径
+        paths = cache_manager.get_file_paths(
+            file_params={
+                'base_path': 'path',
+                'sub_dir': 'path',
+                'filename': 'name'
+            },
+            kwargs=request.data
+        )
+        
+        if not paths:
+            return Response({'error': 'Invalid path'}, status=400)
+        
+        # 使用缓存管理器执行
+        result = cache_manager.cache_with_files(
+            file_paths=paths,
+            func=self.process_single_file,
+            args=(paths[0],)
+        )
+        
+        return Response(result)
     
     @action(detail=False, methods=['post'])
     @file_based_cache(
@@ -562,29 +594,21 @@ class SParameterViewSet(viewsets.ModelViewSet):
         """处理多个文件并单独缓存结果"""
         file_list = request.data.get('files', [])
         
-        # 使用支持子目录的文件缓存
+        # 创建缓存管理器
         cache_manager = CacheManager(
-            backend='file',  # 使用扩展的文件缓存后端
+            backend='file',
             timeout=3600,
             sub_dirs=[f'user_{request.user.id}', 'parameter_data']
         )
         
         results = {}
-        for file_info in file_list:
-            file_path = str(file_info)
-            file_hash = cache_manager.get_file_hash(file_path)
-            if not file_hash:
-                continue
-            
-            cache_key = f"file_result_{file_hash}"
-            cached_result = cache_manager.get(cache_key)
-            
-            if cached_result is not None:
-                results[file_path] = cached_result
-                continue
-            
-            result = self.process_single_file(file_path)
-            cache_manager.set(cache_key, result)
+        for file_path in file_list:
+            # 直接使用缓存管理器的方法
+            result = cache_manager.cache_with_files(
+                file_paths=file_path,
+                func=self.process_single_file,
+                args=(file_path,)
+            )
             results[file_path] = result
         
         return Response(results)
@@ -612,6 +636,43 @@ class SParameterViewSet(viewsets.ModelViewSet):
                 'timestamp': timezone.now().isoformat()
             }
         return result
+
+    def custom_path_join(*parts):
+        """自定义路径拼接逻辑"""
+        return '_'.join(parts)
+
+    @action(detail=True, methods=['post'])
+    @file_based_cache(
+        file_params=['prefix', 'name', 'suffix'],
+        path_join_func=custom_path_join
+    )
+    def process_custom_path(self, request, pk=None):
+        prefix = request.data.get('prefix')
+        name = request.data.get('name')
+        suffix = request.data.get('suffix')
+        
+        # 将生成类似 'prefix_name_suffix' 的路径
+        return Response(self.process_data())
+
+    @action(detail=True, methods=['post'])
+    def process_user_files(self, request, pk=None):
+        cache_manager = FileCacheManager(
+            backend='file',
+            sub_dirs=[
+                f'user_{request.user.id}',
+                datetime.now().strftime('%Y-%m'),
+                'temp'
+            ]
+        )
+        
+        file_path = request.data.get('file_path')
+        result = cache_manager.cache_with_files(
+            file_paths=file_path,
+            func=self.process_file,
+            args=(file_path,)
+        )
+        
+        return Response(result)
 
 @shared_task
 def run_simulation(simulation_id: int, parameters: dict):
@@ -653,3 +714,58 @@ def run_simulation(simulation_id: int, parameters: dict):
         simulation.error_message = str(e)
         simulation.save()
         raise
+
+class FileProcessViewSet(viewsets.ModelViewSet):
+    
+    # 使用装饰器处理单个文件
+    @action(detail=True, methods=['post'])
+    @file_based_cache(
+        file_params='file_path',
+        backend='file',
+        timeout=3600
+    )
+    def process_single_file(self, request, pk=None):
+        file_path = request.data.get('file_path')
+        result = self.process_file(file_path)
+        return Response(result)
+    
+    # 使用装饰器处理复杂路径
+    @action(detail=True, methods=['post'])
+    @file_based_cache(
+        file_params={
+            'base_path': 'path',
+            'sub_dir': 'path',
+            'filename': 'name'
+        },
+        backend='file'
+    )
+    def process_complex_path(self, request, pk=None):
+        base_path = request.data.get('base_path')
+        sub_dir = request.data.get('sub_dir')
+        filename = request.data.get('filename')
+        
+        full_path = os.path.join(base_path, sub_dir, filename)
+        result = self.process_file(full_path)
+        return Response(result)
+    
+    # 直接使用文件缓存管理器
+    @action(detail=False, methods=['post'])
+    def process_multiple_files(self, request):
+        file_list = request.data.get('files', [])
+        
+        cache_manager = FileCacheManager(
+            backend='file',
+            timeout=3600,
+            sub_dirs=[f'user_{request.user.id}', 'parameter_data']
+        )
+        
+        results = {}
+        for file_path in file_list:
+            result = cache_manager.cache_with_files(
+                file_paths=file_path,
+                func=self.process_file,
+                args=(file_path,)
+            )
+            results[file_path] = result
+        
+        return Response(results)

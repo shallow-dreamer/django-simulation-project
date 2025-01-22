@@ -10,7 +10,7 @@ import hashlib
 import json
 from rest_framework.response import Response
 from rest_framework.request import Request
-from typing import Callable, Any, Union, List, Dict
+from typing import Callable, Any, Union, List, Dict, Optional
 from pathlib import Path
 from .cache.manager import CacheManager
 import os
@@ -144,96 +144,24 @@ def file_based_cache(
     sub_dirs: List[str] = None,
     path_join_func: Callable = None
 ):
-    """
-    基于文件内容的缓存装饰器
-    :param file_params: 文件参数配置，支持多种格式：
-        - str: 单个参数名
-        - int: 单个位置参数索引
-        - List[Union[str, int]]: 多个参数，将被拼接
-        - Dict[str, str]: 键为参数名，值为参数类型('path'/'name')
-    :param backend: 缓存后端
-    :param timeout: 超时时间
-    :param sub_dirs: 子目录列表
-    :param path_join_func: 自定义路径拼接函数
-    """
+    """文件缓存装饰器"""
     cache_manager = CacheManager(
         backend=backend,
         timeout=timeout,
         sub_dirs=sub_dirs
     )
-    
-    def get_file_paths(args, kwargs) -> List[str]:
-        """获取所有文件路径"""
-        paths = []
-        
-        if isinstance(file_params, (str, int)):
-            # 单个参数
-            path = _get_single_path(file_params, args, kwargs)
-            if path:
-                paths.append(path)
-                
-        elif isinstance(file_params, list):
-            # 多个参数需要拼接
-            path_parts = []
-            for param in file_params:
-                part = _get_single_path(param, args, kwargs)
-                if part:
-                    path_parts.append(part)
-            
-            if path_parts:
-                # 使用自定义拼接函数或默认的 os.path.join
-                join_func = path_join_func or os.path.join
-                paths.append(join_func(*path_parts))
-                
-        elif isinstance(file_params, dict):
-            # 复杂的路径配置
-            path_parts = {'path': [], 'name': []}
-            for param, param_type in file_params.items():
-                value = _get_single_path(param, args, kwargs)
-                if value:
-                    path_parts[param_type].append(value)
-            
-            # 拼接路径
-            if path_parts['path'] or path_parts['name']:
-                base_path = os.path.join(*path_parts['path']) if path_parts['path'] else ''
-                filename = os.path.join(*path_parts['name']) if path_parts['name'] else ''
-                if base_path and filename:
-                    paths.append(os.path.join(base_path, filename))
-                elif base_path:
-                    paths.append(base_path)
-                elif filename:
-                    paths.append(filename)
-        
-        return paths
-    
-    def _get_single_path(param, args, kwargs) -> str:
-        """获取单个路径参数"""
-        if isinstance(param, int) and len(args) > param:
-            return str(args[param])
-        elif isinstance(param, str) and param in kwargs:
-            return str(kwargs[param])
-        return None
+    cache_manager.path_join_func = path_join_func
 
-    def key_generator(*args, **kwargs):
-        """基于文件内容生成缓存键"""
-        file_paths = get_file_paths(args, kwargs)
-        if not file_paths:
-            return None
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # 获取文件路径
+            paths = cache_manager.get_file_paths(file_params, args, kwargs)
+            if not paths:
+                return func(*args, **kwargs)
             
-        # 计算所有文件的组合哈希
-        hashes = []
-        for path in file_paths:
-            file_hash = cache_manager.get_file_hash(path)
-            if file_hash:
-                hashes.append(file_hash)
-                
-        if not hashes:
-            return None
-            
-        # 组合多个哈希
-        return '_'.join(hashes)
+            # 使用缓存管理器执行
+            return cache_manager.cache_with_files(paths, func, args, kwargs)
+        return wrapper
 
-    return cache_manager.cached(
-        timeout=timeout,
-        key_generator=key_generator
-    )
+    return decorator

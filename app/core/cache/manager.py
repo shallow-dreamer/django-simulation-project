@@ -4,13 +4,15 @@ from functools import wraps
 import hashlib
 import json
 import inspect
-from typing import Callable, Any, Union
+from typing import Callable, Any, Union, List, Optional
 from pathlib import Path
 from django.core.cache.backends.redis import RedisCache
 from django.core.cache.backends.filebased import FileBasedCache
 from django.core.cache.backends.locmem import LocMemCache
 from django.core.cache.backends import CustomFileCache
 from app.core.cache.mixins import SubDirCacheMixin
+import os
+from .file_utils import FilePathHandler, FileHasher
 
 class CacheManager:
     """缓存管理器"""
@@ -21,38 +23,6 @@ class CacheManager:
         self.key_prefix = key_prefix or getattr(settings, 'CACHE_KEY_PREFIX', '')
         self.sub_dirs = sub_dirs
         self._cache = caches[backend]
-
-    def get_file_hash(self, file_path: Union[str, Path]) -> str:
-        """获取文件内容的哈希值"""
-        path = Path(file_path)
-        if not path.exists():
-            return None
-            
-        with open(path, 'rb') as f:
-            file_hash = hashlib.md5()
-            # 分块读取大文件
-            for chunk in iter(lambda: f.read(4096), b''):
-                file_hash.update(chunk)
-        return file_hash.hexdigest()
-
-    def get_cache_key(self, *args, key_generator: Callable = None, **kwargs) -> str:
-        """
-        生成缓存键
-        :param args: 函数参数
-        :param key_generator: 自定义键生成函数
-        :param kwargs: 函数关键字参数
-        :return: 缓存键
-        """
-        if key_generator:
-            # 使用自定义键生成器
-            key = key_generator(*args, **kwargs)
-        else:
-            # 默认键生成策略
-            args_str = json.dumps(args, sort_keys=True)
-            kwargs_str = json.dumps(kwargs, sort_keys=True)
-            key = hashlib.md5(f"{args_str}{kwargs_str}".encode()).hexdigest()
-            
-        return f"{self.key_prefix}{key}"
 
     def get(self, key, default=None):
         """获取缓存"""
@@ -81,36 +51,94 @@ class CacheManager:
         if isinstance(self._cache, SubDirCacheMixin) and self.sub_dirs:
             return self._cache.clear_sub_dir(self.sub_dirs)
 
+    def get_cache_key(self, *args, key_generator: Callable = None, **kwargs) -> str:
+        """生成缓存键"""
+        if key_generator:
+            key = key_generator(*args, **kwargs)
+        else:
+            args_str = json.dumps(args, sort_keys=True)
+            kwargs_str = json.dumps(kwargs, sort_keys=True)
+            key = hashlib.md5(f"{args_str}{kwargs_str}".encode()).hexdigest()
+        return f"{self.key_prefix}{key}"
+
     def cached(self, timeout=None, key_prefix=None, key_generator=None):
-        """
-        缓存装饰器
-        :param timeout: 缓存超时时间
-        :param key_prefix: 键前缀
-        :param key_generator: 自定义键生成函数
-        """
+        """基本缓存装饰器"""
         def decorator(func):
             @wraps(func)
             def wrapper(*args, **kwargs):
-                # 生成缓存键
                 if key_prefix:
                     cache_key = f"{key_prefix}_{self.get_cache_key(*args, key_generator=key_generator, **kwargs)}"
                 else:
                     cache_key = f"{func.__name__}_{self.get_cache_key(*args, key_generator=key_generator, **kwargs)}"
-
-                # 尝试获取缓存
+                
                 cached_value = self.get(cache_key)
                 if cached_value is not None:
                     return cached_value
-
-                # 执行函数
+                
                 result = func(*args, **kwargs)
-
-                # 设置缓存
-                self.set(cache_key, result, timeout or self.timeout)
-
+                self.set(cache_key, result, timeout)
                 return result
             return wrapper
-        return decorator 
+        return decorator
+
+class FileCacheManager(CacheManager):
+    """文件缓存管理器"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.file_handler = FilePathHandler()
+        self.file_hasher = FileHasher()
+
+    def get_file_paths(self, file_params, args=None, kwargs=None) -> List[str]:
+        """获取文件路径列表"""
+        return self.file_handler.get_paths(file_params, args, kwargs)
+
+    def cache_with_files(
+        self,
+        file_paths: Union[str, List[str]],
+        func: Callable,
+        args: tuple = None,
+        kwargs: dict = None
+    ) -> Any:
+        """使用文件内容进行缓存"""
+        args = args or ()
+        kwargs = kwargs or {}
+        paths = [file_paths] if isinstance(file_paths, str) else file_paths
+        
+        files_hash = self.file_hasher.get_files_hash(paths)
+        if not files_hash:
+            return func(*args, **kwargs)
+        
+        cache_key = f"file_cache_{files_hash}"
+        cached_value = self.get(cache_key)
+        if cached_value is not None:
+            return cached_value
+        
+        result = func(*args, **kwargs)
+        self.set(cache_key, result)
+        return result
+
+    def get_file_hash(self, file_path: Union[str, Path]) -> Optional[str]:
+        """获取文件内容的哈希值"""
+        path = Path(file_path)
+        if not path.exists():
+            return None
+            
+        with open(path, 'rb') as f:
+            file_hash = hashlib.md5()
+            for chunk in iter(lambda: f.read(4096), b''):
+                file_hash.update(chunk)
+        return file_hash.hexdigest()
+
+    def get_files_cache_key(self, file_paths: List[str]) -> Optional[str]:
+        """生成基于文件内容的缓存键"""
+        hashes = []
+        for path in file_paths:
+            file_hash = self.get_file_hash(path)
+            if file_hash:
+                hashes.append(file_hash)
+        
+        return f"file_cache_{'_'.join(hashes)}" if hashes else None
 
     def get_or_set(self, key: str, default_func: callable, timeout=None):
         """获取缓存，不存在则设置"""
